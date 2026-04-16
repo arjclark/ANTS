@@ -1085,19 +1085,26 @@ def defer_cube(cube):
     # themselves.  This has an undesirable effect of calling the object
     # tidy-up (thus deleting the files early).
     cubes = as_cubelist(cube)
-    res = iris.cube.CubeList()
+    #res = iris.cube.CubeList()
     for cc in cubes:
-        fh = tempfile.NamedTemporaryFile(suffix=".nc")
+        fh = tempfile.NamedTemporaryFile(suffix=".nc.npy")
         _LOGGER.info("Deferring data to {}".format(fh.name))
         # Close the created filehandle as we cannot share it between processes
         # if we could then it would clear up the file on garbage collection.
         fh.close()
-        save.netcdf(cc, fh.name, update_history=False)
-        cc = ants.io.load.load_cube(fh.name)
+        #save.netcdf(cc, fh.name, update_history=False)
+        #cc = ants.io.load.load_cube(fh.name)
+        #cc._fh = fh.name
+        #res.append(cc)
+
+        # Wherever data is non-lazy we send it to disk and bring back in so
+        # it becomes lazy
+        #if not isinstance(cc.core_data(), dask.array.Array):
+        np.save(fh.name, cc.data)
+        cc.data = np.load(fh.name)
         cc._fh = fh.name
-        res.append(cc)
         atexit.register(_delete_temporary_file, fh.name)
-    cubes = res
+    #cubes = res
     if isinstance(cube, iris.cube.Cube):
         cubes = cubes[0]
     return cubes
