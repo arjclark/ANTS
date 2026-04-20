@@ -1087,7 +1087,7 @@ def defer_cube(cube):
     cubes = as_cubelist(cube)
     #res = iris.cube.CubeList()
     for cc in cubes:
-        fh = tempfile.NamedTemporaryFile(suffix=".nc.npy")
+        fh = tempfile.NamedTemporaryFile(suffix=".nc.npz")
         _LOGGER.info("Deferring data to {}".format(fh.name))
         # Close the created filehandle as we cannot share it between processes
         # if we could then it would clear up the file on garbage collection.
@@ -1100,8 +1100,19 @@ def defer_cube(cube):
         # Wherever data is non-lazy we send it to disk and bring back in so
         # it becomes lazy
         #if not isinstance(cc.core_data(), dask.array.Array):
-        np.save(fh.name, cc.data)
-        cc.data = np.load(fh.name)
+        #np.save(fh.name, cc.data)
+
+        #force realising the data for now...
+        cc.data
+        if isinstance(cc.core_data(), np.ma.MaskedArray):
+            np.savez_compressed(fh.name, data=cc.data.data, mask=cc.data.mask)
+            with np.load(fh.name) as payload:
+                cc.data = np.ma.MaskedArray(data = payload['data'], mask = payload['mask'])
+        else:
+            np.savez_compressed(fh.name, data=cc.data)
+            with np.load(fh.name) as payload:
+                cc.data = payload['data']
+
         cc._fh = fh.name
         atexit.register(_delete_temporary_file, fh.name)
     #cubes = res
