@@ -268,6 +268,20 @@ def _assess_decomposition_preconditions(operation, targets, pad_width):
     return messages
 
 
+def _decomposition_policy():
+    """Return decomposition risk policy mode.
+
+    Supported values are ``advisory`` (default) and ``strict``.
+    """
+    policy = os.getenv("ANTS_DECOMPOSITION_POLICY", "advisory").strip().lower()
+    if policy not in ("advisory", "strict"):
+        _LOGGER.warning(
+            "Unknown ANTS_DECOMPOSITION_POLICY=%r, defaulting to advisory.", policy
+        )
+        policy = "advisory"
+    return policy
+
+
 def decompose(operation, sources, targets=None):
     """
     Decompose source(s) [and optional targets] and apply operation on each segment.
@@ -376,10 +390,19 @@ def decompose(operation, sources, targets=None):
         result = ants.utils.cube.defer_cube(result)
     else:
         # Use decomposition.
-        for message in _assess_decomposition_preconditions(
+        precondition_messages = _assess_decomposition_preconditions(
             operation, targets, pad_width
-        ):
-            _LOGGER.warning(message)
+        )
+        if precondition_messages:
+            if _decomposition_policy() == "strict":
+                msg = (
+                    "Decomposition policy 'strict' rejected operation: {}".format(
+                        " ".join(precondition_messages)
+                    )
+                )
+                raise RuntimeError(msg)
+            for message in precondition_messages:
+                _LOGGER.warning(message)
 
         if targets:
             mosaics = gen_mosaics(targets, split)

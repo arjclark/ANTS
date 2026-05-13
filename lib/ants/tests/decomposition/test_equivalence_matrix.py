@@ -163,14 +163,18 @@ class TestDecompositionEquivalenceMatrix(ants.tests.TestCase):
 
         baseline = self._run_with_split(binary_regrid_linear, source, target, (0, 0))
         scenarios = [
-            ((1, 1), 0),
-            ((2, 2), 0),
-            ((2, 2), 1),
-            (("automatic", "automatic"), 1),
+            ((1, 1), 0, 1),
+            ((2, 2), 0, 1),
+            ((2, 2), 1, 1),
+            (("automatic", "automatic"), 1, 1),
+            ((2, 2), 1, 2),
+            (("automatic", "automatic"), 1, 2),
         ]
 
-        for split, pad_width in scenarios:
-            with self.subTest(split=split, pad_width=pad_width):
+        for split, pad_width, processes in scenarios:
+            with self.subTest(split=split, pad_width=pad_width, processes=processes):
                 self.mock_config["ants_decomposition"]["pad_width"] = pad_width
-                decomposed = self._run_with_split(binary_regrid_linear, source, target, split)
+                decomposed = self._run_with_split(
+                    binary_regrid_linear, source, target, split, processes
+                )
                 self._assert_cube_equivalent(decomposed, baseline)

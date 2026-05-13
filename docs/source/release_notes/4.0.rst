@@ -8,6 +8,10 @@ For a full list of changes see the :milestone:`4.0 release milestone <2>`.
 
 Features
 ========
+- Added optional strict decomposition risk policy via
+  ``ANTS_DECOMPOSITION_POLICY=strict``. In strict mode, decomposition now
+  raises an exception for high-risk operation preconditions that are advisory
+  warnings by default.
 
 Bugs Fixed
 ==========
@@ -22,6 +26,10 @@ Incompatible Changes
 
 Infrastructure
 ==============
+- Expanded decomposition equivalence coverage with explicit regrid risk-matrix
+  tests across split, ``pad_width``, and process-mode combinations
+  (single-process and multi-process), with known divergence cases tracked as
+  expected failures.
 
 Documentation
 =============

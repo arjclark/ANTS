@@ -124,6 +124,28 @@ This feature may be useful if the source and target are on very different
 coordinate systems, for example regridding from a standard lat-lon grid to a
 rotated pole domain.
 
+Advisory Warnings and Strict Policy
+-----------------------------------
+
+When decomposition is enabled, ANTS performs a lightweight precondition check
+and emits warnings for operation patterns that are at higher risk of diverging
+from non-decomposed results. Current warning categories include:
+
+* reduction-like operation names (for example ``mean``, ``sum``, ``std``),
+* binary regrid-like operation names,
+* binary operations configured with ``pad_width = 0``.
+
+These warnings are advisory by default and do not stop execution. To fail fast
+instead, set the environment variable ``ANTS_DECOMPOSITION_POLICY`` to
+``strict``:
+
+.. code-block:: bash
+
+    export ANTS_DECOMPOSITION_POLICY=strict
+
+In strict mode, decomposition raises an exception when a risk precondition is
+identified.
+
 For more details on configuration of ANTS based applications visit the
 documentation at :mod:`ants.config`.
 

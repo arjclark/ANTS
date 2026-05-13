@@ -313,3 +313,32 @@ class TestAll(ants.tests.TestCase):
             "boundary-related divergence for binary operations."
         )
         mock_warning.assert_any_call(msg)
+
+    @mock.patch("ants.decomposition._LOGGER.warning")
+    def test_strict_policy_rejects_risky_operation(self, mock_warning):
+        self.mock_config["ants_decomposition"]["x_split"] = 1
+        self.mock_config["ants_decomposition"]["y_split"] = 1
+        os.environ["ANTS_DECOMPOSITION_POLICY"] = "strict"
+
+        def my_mean(source):
+            return source
+
+        msg = "Decomposition policy 'strict' rejected operation"
+        with self.assertRaisesRegex(RuntimeError, msg):
+            decompose(my_mean, self.cube)
+        mock_warning.assert_not_called()
+
+    @mock.patch("ants.decomposition._LOGGER.warning")
+    def test_unknown_policy_falls_back_to_advisory(self, mock_warning):
+        self.mock_config["ants_decomposition"]["x_split"] = 1
+        self.mock_config["ants_decomposition"]["y_split"] = 1
+        os.environ["ANTS_DECOMPOSITION_POLICY"] = "invalid"
+
+        def my_mean(source):
+            return source
+
+        decompose(my_mean, self.cube)
+        mock_warning.assert_any_call(
+            "Unknown ANTS_DECOMPOSITION_POLICY=%r, defaulting to advisory.",
+            "invalid",
+        )
