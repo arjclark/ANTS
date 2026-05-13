@@ -33,4 +33,9 @@ Infrastructure
 
 Documentation
 =============
+- Documented that decomposed binary regridding divergence is an inherent
+  interpolation limitation for certain scenarios, and clarified operational
+  guidance: prefer non-decomposed regrid for reproducibility-critical
+  workflows; choose decomposition splits for memory and throughput (not
+  divergence tuning).
 

@@ -146,6 +146,34 @@ instead, set the environment variable ``ANTS_DECOMPOSITION_POLICY`` to
 In strict mode, decomposition raises an exception when a risk precondition is
 identified.
 
+Regrid Reproducibility Guidance
+-------------------------------
+
+Investigation evidence shows that binary regridding under decomposition can
+produce different results to non-decomposed execution for interpolation-heavy
+cases (for example downsampling with linear interpolation). This divergence is
+an inherent property of decomposed interpolation semantics and is not removed
+by tuning decomposition settings.
+
+In particular:
+
+* changing ``pad_width`` does not resolve regrid divergence,
+* changing split layout (1D vs 2D, symmetric vs asymmetric) does not resolve
+    regrid divergence,
+* split choices should therefore be made for memory and throughput needs,
+    rather than reproducibility tuning.
+
+For reproducibility-critical workflows, prefer non-decomposed regridding where
+feasible. Where decomposition is required due to data volume, treat regrid as
+potentially unsafe and validate representative outputs against a
+non-decomposed baseline.
+
+To fail fast on known high-risk patterns, use strict policy mode:
+
+.. code-block:: bash
+
+        export ANTS_DECOMPOSITION_POLICY=strict
+
 For more details on configuration of ANTS based applications visit the
 documentation at :mod:`ants.config`.
 

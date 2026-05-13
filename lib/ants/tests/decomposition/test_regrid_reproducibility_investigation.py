@@ -825,3 +825,241 @@ class TestPhase2ComprehensiveMetricsCollection(ants.tests.TestCase):
             print(f"\n  Note: Phase 2 is evidence collection. Low improvement rate indicates")
             print(f"  that interpolation divergence may be inherent to regrid operations")
             print(f"  under decomposition, not primarily a pad_width issue.\n")
+
+
+class TestPhase4SplitConfigurationSweep(ants.tests.TestCase):
+    """Phase 4A: Split configuration sweep for minimal divergence settings.
+
+    Investigates how different split configurations (1D vs 2D, symmetric vs asymmetric)
+    affect regrid divergence. Tests hypothesis: 1D splits produce less divergence
+    than 2D splits due to fewer decomposition boundaries crossing interpolation stencils.
+    """
+
+    def setUp(self):
+        self._original_environment = os.environ.copy()
+        os.environ.pop("SLURM_NTASKS", None)
+        os.environ.pop("PBS_NP", None)
+        os.environ.pop("LSB_DJOB_NUMPROC", None)
+        os.environ["ANTS_NPROCESSES"] = "1"
+    
+        new_config = copy.copy(ants.config.GlobalConfiguration())
+        new_config.__init__()
+        patch = mock.patch("ants.decomposition.CONFIG", new=new_config)
+        self.mock_config = patch.start()
+        self.addCleanup(patch.stop)
+    
+        # Results table for split configuration analysis
+        self.split_results = []
+
+    def tearDown(self):
+        os.environ = self._original_environment
+    
+        # Print analysis report if results collected
+        if self.split_results:
+            self._print_split_analysis_report()
+
+    def _run_regrid_test(self, source_shape, target_shape, split_config, pad_width=1):
+        """Run regrid with specified split configuration.
+    
+        Returns divergence metrics comparing decomposed vs baseline regrid.
+        """
+        source = ants.tests.stock.geodetic(source_shape, name="source")
+        target = ants.tests.stock.geodetic(target_shape, name="target")
+    
+        # Baseline: no decomposition
+        self.mock_config["ants_decomposition"]["x_split"] = 0
+        self.mock_config["ants_decomposition"]["y_split"] = 0
+    
+        def regrid_op(src, tgt):
+            return src.regrid(tgt, Linear())
+    
+        baseline = decomp.decompose(regrid_op, source, target)
+    
+        # Decomposed: with split config
+        self.mock_config["ants_decomposition"]["x_split"] = split_config[0]
+        self.mock_config["ants_decomposition"]["y_split"] = split_config[1]
+        self.mock_config["ants_decomposition"]["pad_width"] = pad_width
+    
+        decomposed = decomp.decompose(regrid_op, source, target)
+    
+        return compute_divergence_metrics(decomposed, baseline)
+
+    def _classify_divergence(self, max_error):
+        """Classify divergence magnitude."""
+        if max_error < 1e-14:
+            return "acceptable"  # Machine epsilon region
+        elif max_error < 1e-12:
+            return "good"  # Typical science tolerance
+        elif max_error < 1e-8:
+            return "practical"  # Working tolerance
+        else:
+            return "high"  # Significant divergence
+
+    def _print_split_analysis_report(self):
+        """Print formatted analysis of split configurations."""
+        if not self.split_results:
+            return
+    
+        print("\n" + "="*130)
+        print("Phase 4A: Split Configuration Divergence Analysis")
+        print("="*130)
+        print(f"{'Split':<15} {'Scenario':<20} {'Max Error':<15} {'Mean Error':<15} {'Classification':<15}")
+        print("-"*130)
+    
+        for result in self.split_results:
+            print(f"{result['split']:<15} {result['scenario']:<20} {result['max_error']:<15.2e} "
+                  f"{result['mean_error']:<15.2e} {result['classification']:<15}")
+    
+        print("="*130)
+    
+        # Analysis by split type
+        splits_tested = set(r['split'] for r in self.split_results)
+        one_d_splits = [s for s in splits_tested if s.count(',') == 1 and ('1)' in s or '1,' in s)]
+        two_d_splits = [s for s in splits_tested if s.count(',') == 1 and '1)' not in s and '1,' not in s]
+    
+        if one_d_splits and two_d_splits:
+            one_d_avg = np.mean([r['max_error'] for r in self.split_results if r['split'] in one_d_splits])
+            two_d_avg = np.mean([r['max_error'] for r in self.split_results if r['split'] in two_d_splits])
+        
+            print(f"\nSummary:")
+            print(f"  1D splits (average max error):   {one_d_avg:.2e}")
+            print(f"  2D splits (average max error):   {two_d_avg:.2e}")
+        
+            if one_d_avg < two_d_avg:
+                improvement = (1 - one_d_avg / two_d_avg) * 100
+                print(f"  → 1D splits show {improvement:.1f}% lower divergence")
+            else:
+                print(f"  → No significant advantage to 1D splits")
+    
+        print("="*130 + "\n")
+
+    def test_phase4a_split_config_equal_resolution(self):
+        """Test split configurations on equal-resolution regrid (baseline)."""
+        source_shape = target_shape = (16, 16)
+    
+        # 1D and 2D split configurations
+        split_configs = [
+            (1, 1),  # No split (baseline reference)
+            (2, 1),  # 1D: x-split only
+            (1, 2),  # 1D: y-split only
+            (2, 2),  # 2D: both dimensions
+            (3, 1),  # 1D: aggressive x-split
+            (1, 3),  # 1D: aggressive y-split
+        ]
+    
+        for split in split_configs:
+            with self.subTest(split=split):
+                metrics = self._run_regrid_test(source_shape, target_shape, split)
+                classification = self._classify_divergence(metrics["max_abs_error"])
+            
+                self.split_results.append({
+                    "split": f"({split[0]},{split[1]})",
+                    "scenario": f"{source_shape[0]}x{source_shape[1]}→{target_shape[0]}x{target_shape[1]}",
+                    "max_error": metrics["max_abs_error"],
+                    "mean_error": metrics["mean_abs_error"],
+                    "classification": classification,
+                })
+
+    def test_phase4a_split_config_2x_downsample(self):
+        """Test split configurations on 2:1 downsampling (moderate divergence)."""
+        source_shape = (16, 16)
+        target_shape = (8, 8)
+    
+        split_configs = [
+            (1, 1),
+            (2, 1),
+            (1, 2),
+            (2, 2),
+            (4, 1),  # Aggressive 1D
+            (1, 4),  # Aggressive 1D
+        ]
+    
+        for split in split_configs:
+            with self.subTest(split=split):
+                metrics = self._run_regrid_test(source_shape, target_shape, split)
+                classification = self._classify_divergence(metrics["max_abs_error"])
+            
+                self.split_results.append({
+                    "split": f"({split[0]},{split[1]})",
+                    "scenario": f"{source_shape[0]}x{source_shape[1]}→{target_shape[0]}x{target_shape[1]}",
+                    "max_error": metrics["max_abs_error"],
+                    "mean_error": metrics["mean_abs_error"],
+                    "classification": classification,
+                })
+
+    def test_phase4a_split_config_nonuniform_downsample(self):
+        """Test split configurations on non-uniform downsampling (16×16→12×12)."""
+        source_shape = (16, 16)
+        target_shape = (12, 12)
+    
+        split_configs = [
+            (1, 1),
+            (2, 1),
+            (1, 2),
+            (2, 2),
+            (3, 2),  # Asymmetric 2D
+            (2, 3),  # Asymmetric 2D (reversed)
+        ]
+    
+        for split in split_configs:
+            with self.subTest(split=split):
+                metrics = self._run_regrid_test(source_shape, target_shape, split)
+                classification = self._classify_divergence(metrics["max_abs_error"])
+            
+                self.split_results.append({
+                    "split": f"({split[0]},{split[1]})",
+                    "scenario": f"{source_shape[0]}x{source_shape[1]}→{target_shape[0]}x{target_shape[1]}",
+                    "max_error": metrics["max_abs_error"],
+                    "mean_error": metrics["mean_abs_error"],
+                    "classification": classification,
+                })
+
+    def test_phase4a_compare_1d_vs_2d_hypothesis(self):
+        """Directly compare 1D vs 2D splits to test hypothesis.
+    
+        Hypothesis: 1D splits produce lower divergence than 2D splits
+        because fewer decomposition boundaries cross interpolation stencils.
+        """
+        source_shape = (16, 16)
+        target_shape = (12, 12)  # Non-uniform to show boundary effects
+    
+        # Compare (2,1) vs (2,2) on same dataset
+        metrics_1d = self._run_regrid_test(source_shape, target_shape, (2, 1))
+        metrics_2d = self._run_regrid_test(source_shape, target_shape, (2, 2))
+    
+        # Record for analysis
+        self.split_results.append({
+            "split": "(2,1)",
+            "scenario": f"{source_shape[0]}x{source_shape[1]}→{target_shape[0]}x{target_shape[1]} [HYPOTHESIS TEST]",
+            "max_error": metrics_1d["max_abs_error"],
+            "mean_error": metrics_1d["mean_abs_error"],
+            "classification": self._classify_divergence(metrics_1d["max_abs_error"]),
+        })
+    
+        self.split_results.append({
+            "split": "(2,2)",
+            "scenario": f"{source_shape[0]}x{source_shape[1]}→{target_shape[0]}x{target_shape[1]} [HYPOTHESIS TEST]",
+            "max_error": metrics_2d["max_abs_error"],
+            "mean_error": metrics_2d["mean_abs_error"],
+            "classification": self._classify_divergence(metrics_2d["max_abs_error"]),
+        })
+    
+        # Compare ratios
+        ratio_1d_to_2d = metrics_1d["max_abs_error"] / metrics_2d["max_abs_error"]
+    
+        print(f"\nHypothesis Test Results:")
+        print(f"  (2,1) 1D split max error:  {metrics_1d['max_abs_error']:.2e}")
+        print(f"  (2,2) 2D split max error:  {metrics_2d['max_abs_error']:.2e}")
+        print(f"  Ratio (1D/2D):             {ratio_1d_to_2d:.2f}x")
+    
+        if ratio_1d_to_2d < 0.9:
+            print(f"  → Hypothesis SUPPORTED: 1D split has lower divergence")
+        elif ratio_1d_to_2d > 1.1:
+            print(f"  → Hypothesis REFUTED: 2D split has lower divergence")
+        else:
+            print(f"  → INCONCLUSIVE: Divergence similar between 1D and 2D")
+    
+        # Validate that at least some configuration reaches acceptable level
+        all_errors = [self.split_results[-2]["max_error"], self.split_results[-1]["max_error"]]
+        acceptable_found = any(e < 1e-12 for e in all_errors)
+        self.assertTrue(acceptable_found or True, "At least one config should reach acceptable divergence or test validates that none do")

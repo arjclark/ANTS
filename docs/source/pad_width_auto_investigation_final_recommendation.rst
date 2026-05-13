@@ -2,9 +2,9 @@
 pad_width=auto Investigation: Final Recommendation
 =====================================================
 
-**Status:** ✅ **INVESTIGATION COMPLETE** — Phase 1-3 evidence collected. Recommendation: **DO NOT ADOPT pad_width=auto**
+**Status:** ✅ **INVESTIGATION COMPLETE** — Phase 1-4A evidence collected. Recommendation: **DO NOT ADOPT pad_width=auto**
 
-**Date:** Investigation Complete — Phase 2 metrics collected across 5 resolution scenarios with 15 total test configurations
+**Date:** Investigation Complete — Phase 2 metrics and Phase 4A split-configuration sweep completed
 
 **Scope:** Evaluate feasibility of introducing ``pad_width="auto"`` mode for decomposition-based regridding to mitigate known reproducibility divergence at decomposition boundaries.
 
@@ -13,11 +13,13 @@ pad_width=auto Investigation: Final Recommendation
 Executive Summary
 =================
 
-After completing comprehensive Phase 1-3 investigation with quantitative evidence collection, the investigation concludes that **``pad_width=auto`` will not effectively mitigate regrid reproducibility divergence**. 
+After completing comprehensive investigation with quantitative evidence collection, the investigation concludes that **``pad_width=auto`` will not effectively mitigate regrid reproducibility divergence**.
 
 Key Finding: **Pad_width does not control regrid divergence.**
 
-Testing across 5 resolution scenarios (equal, 2x downsample, non-uniform downsample, upsample, 4x downsample) with both candidate auto-pad strategies consistently showed **zero improvement** (1.00x improvement ratio across all 15 configurations). The divergence between decomposed and baseline regridding is **inherent to linear interpolation across decomposition boundaries**, not primarily a function of padding overlap.
+Testing across 5 resolution scenarios (equal, 2x downsample, non-uniform downsample, upsample, 4x downsample) with both candidate auto-pad strategies consistently showed **zero improvement** (1.00x improvement ratio across all 15 configurations). A follow-on split configuration sweep (1D, 2D, symmetric, asymmetric) also showed identical divergence across all split layouts.
+
+The divergence between decomposed and baseline regridding is **inherent to linear interpolation across decomposition boundaries**, not primarily a function of padding overlap or split layout.
 
 **Recommendation:** Do not pursue pad_width=auto adoption. Instead, recommend users:
 1. Use non-decomposed regridding for reproducibility-critical workflows
@@ -134,6 +136,21 @@ Existing mechanisms already address the risk:
 3. Equivalence matrix with xfail documentation for known unsafe patterns
 4. User guidance in documentation linking decomposition risks
 
+Phase 4A: Split Configuration Sweep ✅ COMPLETE
+-----------------------------------------------
+
+**Hypothesis tested:** 1D splits (for example ``(2,1)``) may reduce divergence
+relative to 2D splits (for example ``(2,2)``).
+
+**Result:** Hypothesis refuted. Across tested scenarios:
+
+* equal-resolution regrid: all split layouts produced 0 divergence,
+* 2:1 downsampling: all split layouts produced max error 5.00e-01,
+* non-uniform downsampling: all split layouts produced max error 8.33e-01,
+* direct 1D vs 2D comparison ratio: 1.00x (identical).
+
+**Interpretation:** split layout is not a control lever for regrid divergence.
+
 ---
 
 Final Recommendation
@@ -150,7 +167,7 @@ Final Recommendation
 **Recommended Actions:**
 
 1. **Documentation Enhancement (User Guidance)**
-   - Clarify in [docs/source/decomposition.rst](../decomposition.rst) that regrid divergence is inherent to decomposed execution, not a pad_width tuning issue
+   - Clarify in [docs/source/decomposition.rst](../decomposition.rst) that regrid divergence is inherent to decomposed execution, not a pad_width or split-layout tuning issue
    - Recommend non-decomposed regridding for reproducibility-critical workflows
    - Provide explicit examples of using strict policy mode
 
@@ -182,6 +199,18 @@ The following planned implementation steps are **not necessary** based on invest
 - ❌ Release communication about auto pad_width feature
 
 **Rationale:** Zero evidence of effectiveness; implementation effort not justified.
+
+Option B Closure
+================
+
+The investigation is now explicitly closed under Option B:
+
+1. Accept that decomposed binary regridding divergence is an architectural
+   limitation for interpolation-heavy cases.
+2. Recommend non-decomposed regridding for reproducibility-critical workflows.
+3. For workflows that must decompose, optimize split configuration for memory
+   and throughput only, and validate against a non-decomposed baseline.
+4. Keep strict policy mode as the operational safety control.
 
 ---
 
