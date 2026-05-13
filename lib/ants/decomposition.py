@@ -132,6 +132,7 @@ slice(1, 2, None)), (slice(0, None, 1), slice(2, None, 1))]
     return itertools.product(*subdomain)
 
 
+
 class CallableMosaic(object, metaclass=ABCMeta):
     """
     Abstract mosaic generator factory.
@@ -282,6 +283,26 @@ def _decomposition_policy():
     return policy
 
 
+def _source_split(source, split):
+    """Convert split dictionary to source-specific split tuple."""
+    source_split = np.array([1] * source.ndim)
+    x, y = ants.utils.cube.horizontal_grid(source)
+    xdims, ydims = source.coord_dims(x), source.coord_dims(y)
+    source_split[xdims] = split.get("split_x", None) or 1
+    source_split[ydims] = split.get("split_y", None) or 1
+    return tuple(source_split)
+
+
+def _generate_mosaics(sources, split):
+    """Build mosaics for each source cube."""
+    def build_mosaic(source):
+        return MosaicBySplit(source, _source_split(source, split))
+
+    if not isinstance(sources, iris.cube.Cube):
+        return [build_mosaic(src) for src in sources]
+    return build_mosaic(sources)
+
+
 def decompose(operation, sources, targets=None):
     """
     Decompose source(s) [and optional targets] and apply operation on each segment.
@@ -327,37 +348,29 @@ def decompose(operation, sources, targets=None):
 
     """
 
-    def gen_mosaics(sources, split):
-        def gen_split(source, split):
-            """
-            Convert the dictionary 'split' to the source specific dimension
-            mapping.
-
-            """
-            ss = np.array([1] * source.ndim)
-            x, y = ants.utils.cube.horizontal_grid(source)
-            xdims, ydims = source.coord_dims(x), source.coord_dims(y)
-            ss[xdims] = split.get("split_x", None) or 1
-            ss[ydims] = split.get("split_y", None) or 1
-            return tuple(ss)
-
-        if not isinstance(sources, iris.cube.Cube):
-            res = [MosaicBySplit(src, gen_split(src, split)) for src in sources]
-        else:
-            res = MosaicBySplit(sources, gen_split(sources, split))
-        return res
-
     processes = _requested_processes()
 
     pad_width = CONFIG["ants_decomposition"]["pad_width"]
     if pad_width is None:
         pad_width = 1
 
-    decomposition = (
-        MultiprocessingDomainDecompose(pad_width=pad_width)
-        if processes > 1
-        else DomainDecompose(pad_width=pad_width)
-    )
+    source_extractor = os.getenv("ANTS_DECOMPOSITION_SOURCE_EXTRACTOR", "").strip().lower()
+    if source_extractor == "bounds_coverage":
+        decomposition_cls = (
+            MultiprocessingBoundsCoverageDomainDecompose
+            if processes > 1
+            else BoundsCoverageDomainDecompose
+        )
+    else:
+        decomposition_cls = (
+            MultiprocessingDomainDecompose if processes > 1 else DomainDecompose
+        )
+    if source_extractor not in ("", "bounds_coverage"):
+        _LOGGER.warning(
+            "Unknown ANTS_DECOMPOSITION_SOURCE_EXTRACTOR=%r, defaulting to standard.",
+            source_extractor,
+        )
+    decomposition = decomposition_cls(pad_width=pad_width)
 
     # We guess bounds on the full resolution dataset as guessing bounds on each
     # decomposed chunk can produce inconsistent results for circular datasets.
@@ -405,10 +418,10 @@ def decompose(operation, sources, targets=None):
                 _LOGGER.warning(message)
 
         if targets:
-            mosaics = gen_mosaics(targets, split)
+            mosaics = _generate_mosaics(targets, split)
             result = decomposition(operation, mosaics, sources)
         else:
-            mosaics = gen_mosaics(sources, split)
+            mosaics = _generate_mosaics(sources, split)
             result = decomposition(operation, mosaics)
 
     return result
@@ -520,6 +533,125 @@ def _operation_wrap(operation):
         return res
 
     return wrapped_operation
+
+
+def _is_coarser(src_bounds_lo, src_bounds_hi, tgt_bounds_lo, tgt_bounds_hi):
+    """Return True if the source resolution is coarser than the target in this dimension.
+
+    Compares the mean cell width of the source to the mean cell width of the
+    target.  A source is considered coarser when its average cell width exceeds
+    that of the target.
+    """
+    src_width = np.mean(src_bounds_hi - src_bounds_lo)
+    tgt_width = np.mean(tgt_bounds_hi - tgt_bounds_lo)
+    return src_width > tgt_width
+
+
+def _extract_source_by_bounds_coverage(source, target_piece):
+    """Extract the source region whose bounds fully cover the target piece.
+
+    For each horizontal dimension, finds all source cells whose bounds overlap
+    the full extent of the target piece's bounds.  The returned region is the
+    contiguous slice from the first to the last such source cell, guaranteeing
+    that the union of source cell bounds spans the complete target extent.
+
+    **Hybrid coarse-source handling:** when the source is coarser than the
+    target in a given dimension (upsampling), the bounds-coverage region is
+    expanded by one source cell on each side.  This ensures that the linear
+    interpolator at the edges of the piece has access to the same neighbouring
+    source points as a non-decomposed regrid would.
+
+    Returns ``None`` when extraction cannot be performed (multi-dimensional
+    coordinates, missing bounds, no overlap), so the caller can fall back to
+    an alternative extraction strategy.
+
+    Parameters
+    ----------
+    source : iris.cube.Cube
+    target_piece : iris.cube.Cube
+        A single tile from the decomposed target grid.
+
+    Returns
+    -------
+    iris.cube.Cube or None
+    """
+    try:
+        ants.utils.cube.guess_horizontal_bounds(source)
+        ants.utils.cube.guess_horizontal_bounds(target_piece)
+
+        x_src, y_src = ants.utils.cube.horizontal_grid(source)
+        x_tgt, y_tgt = ants.utils.cube.horizontal_grid(target_piece)
+
+        src_xdims = source.coord_dims(x_src)
+        src_ydims = source.coord_dims(y_src)
+
+        if len(src_xdims) != 1 or len(src_ydims) != 1:
+            return None  # multi-dimensional coords: fall back
+
+        if x_src.bounds is None or y_src.bounds is None:
+            return None
+        if x_tgt.bounds is None or y_tgt.bounds is None:
+            return None
+
+        src_x_dim = int(src_xdims[0])
+        src_y_dim = int(src_ydims[0])
+        src_x_size = source.shape[src_x_dim]
+        src_y_size = source.shape[src_y_dim]
+
+        # Per-cell lower / upper bounds (handle ascending and descending coords)
+        src_x_lo = np.minimum(x_src.bounds[:, 0], x_src.bounds[:, 1])
+        src_x_hi = np.maximum(x_src.bounds[:, 0], x_src.bounds[:, 1])
+        src_y_lo = np.minimum(y_src.bounds[:, 0], y_src.bounds[:, 1])
+        src_y_hi = np.maximum(y_src.bounds[:, 0], y_src.bounds[:, 1])
+
+        tgt_x_lo = np.minimum(x_tgt.bounds[:, 0], x_tgt.bounds[:, 1])
+        tgt_x_hi = np.maximum(x_tgt.bounds[:, 0], x_tgt.bounds[:, 1])
+        tgt_y_lo = np.minimum(y_tgt.bounds[:, 0], y_tgt.bounds[:, 1])
+        tgt_y_hi = np.maximum(y_tgt.bounds[:, 0], y_tgt.bounds[:, 1])
+
+        tgt_x_min, tgt_x_max = tgt_x_lo.min(), tgt_x_hi.max()
+        tgt_y_min, tgt_y_max = tgt_y_lo.min(), tgt_y_hi.max()
+
+        # Cells whose bounds overlap the target extent
+        x_mask = (src_x_lo <= tgt_x_max) & (src_x_hi >= tgt_x_min)
+        y_mask = (src_y_lo <= tgt_y_max) & (src_y_hi >= tgt_y_min)
+
+        x_idx = np.where(x_mask)[0]
+        y_idx = np.where(y_mask)[0]
+
+        if x_idx.size == 0 or y_idx.size == 0:
+            return None
+
+        x_start, x_stop = int(x_idx[0]), int(x_idx[-1]) + 1
+        y_start, y_stop = int(y_idx[0]), int(y_idx[-1]) + 1
+
+        # Hybrid: when source is coarser than target in a dimension, expand the
+        # slice by one neighbour cell on each side so the interpolator at piece
+        # edges sees the same context as an undecomposed regrid.
+        if _is_coarser(src_x_lo, src_x_hi, tgt_x_lo, tgt_x_hi):
+            x_start = max(0, x_start - 1)
+            x_stop = min(src_x_size, x_stop + 1)
+
+        if _is_coarser(src_y_lo, src_y_hi, tgt_y_lo, tgt_y_hi):
+            y_start = max(0, y_start - 1)
+            y_stop = min(src_y_size, y_stop + 1)
+
+        # When the source x-coordinate is circular, extracting a partial
+        # longitude range destroys the circularity flag, causing the regridder
+        # to switch from wrap-around interpolation to extrapolation at the
+        # target piece edges.  Preserve the full longitude extent so iris
+        # handles circular wrap-around correctly.
+        if x_src.circular:
+            x_start, x_stop = 0, src_x_size
+
+        slices = [slice(None)] * source.ndim
+        slices[src_x_dim] = slice(x_start, x_stop)
+        slices[src_y_dim] = slice(y_start, y_stop)
+        return source[tuple(slices)]
+
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug("bounds_coverage source extraction failed: %s", exc)
+        return None
 
 
 class DomainDecompose(object):
@@ -728,6 +860,35 @@ class DomainDecompose(object):
         _TMP_FILES.pop(id(self))
 
 
+class BoundsCoverageDomainDecompose(DomainDecompose):
+    """DomainDecompose variant that extracts source pieces by bounds coverage.
+
+    Instead of expanding by a fixed ``pad_width`` in index space, each source
+    piece is the minimal contiguous region whose cell bounds fully cover the
+    corresponding target piece's bounds extent.  Falls back to the standard
+    ``ExtractConstraint``-based extraction if bounds coverage extraction fails.
+    """
+
+    def source_piece_generator(self, source, mosaic):
+        return (
+            self._extract_or_fallback(source, tgt)
+            for tgt in mosaic
+        )
+
+    def _extract_or_fallback(self, source, target_piece):
+        result = _extract_source_by_bounds_coverage(source, target_piece)
+        if result is None:
+            _LOGGER.debug(
+                "bounds_coverage extraction failed, falling back to ExtractConstraint"
+            )
+            return source.extract(
+                ants.ExtractConstraint(
+                    target_piece, fix_period=False, pad_width=self.pad_width
+                )
+            )
+        return result
+
+
 class MultiprocessingDomainDecompose(DomainDecompose):
     """
     Domain decompose an operation in parallel for a given cube for both unary
@@ -746,3 +907,9 @@ class MultiprocessingDomainDecompose(DomainDecompose):
             bag = db.from_sequence(parameters)
             results = bag.starmap(operation).compute()
         return results
+
+
+class MultiprocessingBoundsCoverageDomainDecompose(
+    BoundsCoverageDomainDecompose, MultiprocessingDomainDecompose
+):
+    """Multiprocessing variant of BoundsCoverageDomainDecompose."""
