@@ -265,3 +265,51 @@ class TestAll(ants.tests.TestCase):
 
         # DomainDecompose should have been initialised with a pad_width of 2
         self.decomposer.assert_called_once_with(pad_width=2)
+
+    @mock.patch("ants.decomposition._LOGGER.warning")
+    def test_warn_reduction_like_operation(self, mock_warning):
+        self.mock_config["ants_decomposition"]["x_split"] = 1
+        self.mock_config["ants_decomposition"]["y_split"] = 1
+
+        def my_mean(source):
+            return source
+
+        decompose(my_mean, self.cube)
+        msg = (
+            "Operation appears reduction-like; decomposition may not preserve "
+            "non-decomposed semantics for global statistics."
+        )
+        mock_warning.assert_any_call(msg)
+
+    @mock.patch("ants.decomposition._LOGGER.warning")
+    def test_warn_binary_regrid_like_operation(self, mock_warning):
+        self.mock_config["ants_decomposition"]["x_split"] = 1
+        self.mock_config["ants_decomposition"]["y_split"] = 1
+        target = ants.tests.stock.geodetic((2, 2), name="target")
+
+        def my_regrid(source, tgt):
+            return source
+
+        decompose(my_regrid, self.cube, target)
+        msg = (
+            "Binary regridding can be sensitive to decomposition boundaries; "
+            "validate equivalence against non-decomposed execution."
+        )
+        mock_warning.assert_any_call(msg)
+
+    @mock.patch("ants.decomposition._LOGGER.warning")
+    def test_warn_pad_width_zero(self, mock_warning):
+        self.mock_config["ants_decomposition"]["x_split"] = 1
+        self.mock_config["ants_decomposition"]["y_split"] = 1
+        self.mock_config["ants_decomposition"]["pad_width"] = 0
+        target = ants.tests.stock.geodetic((2, 2), name="target")
+
+        def my_binary(source, tgt):
+            return source
+
+        decompose(my_binary, self.cube, target)
+        msg = (
+            "pad_width=0 disables source overlap padding and may increase "
+            "boundary-related divergence for binary operations."
+        )
+        mock_warning.assert_any_call(msg)

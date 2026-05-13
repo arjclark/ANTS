@@ -206,6 +206,68 @@ def _guess_split(sources, target=None):
     return {"split_x": x_split, "split_y": y_split}
 
 
+def _resolve_split_settings(sources, targets, x_split, y_split):
+    """Resolve and validate decomposition split settings.
+
+    Returns ``None`` when decomposition is disabled, otherwise a split
+    dictionary suitable for mosaic generation.
+    """
+    if (x_split is None) ^ (y_split is None):
+        msg = "If either x_split or y_split is set, both must be."
+        raise RuntimeError(msg)
+
+    if (x_split == "automatic") ^ (y_split == "automatic"):
+        msg = "If either x_split or y_split is set to automatic, both must be."
+        raise RuntimeError(msg)
+    if (x_split == 0) ^ (y_split == 0):
+        msg = "If either x_split or y_split is set to 0, both must be."
+        raise RuntimeError(msg)
+
+    if x_split == y_split == 0 or x_split is y_split is None:
+        return None
+
+    if x_split == y_split == "automatic":
+        return _guess_split(sources, targets)
+
+    return {"split_x": x_split, "split_y": y_split}
+
+
+def _operation_name(operation):
+    if hasattr(operation, "func"):
+        # Support for functools.partial
+        return operation.func.__name__
+    if hasattr(operation, "__class__") and not hasattr(operation, "__name__"):
+        # Support for callable classes
+        return operation.__class__.__name__
+    return operation.__name__
+
+
+def _assess_decomposition_preconditions(operation, targets, pad_width):
+    """Return advisory messages for operations at higher risk of divergence."""
+    messages = []
+    op_name = _operation_name(operation).lower()
+
+    if any(name in op_name for name in ("mean", "sum", "std", "quantile", "percentile")):
+        messages.append(
+            "Operation appears reduction-like; decomposition may not preserve "
+            "non-decomposed semantics for global statistics."
+        )
+
+    if targets is not None and "regrid" in op_name:
+        messages.append(
+            "Binary regridding can be sensitive to decomposition boundaries; "
+            "validate equivalence against non-decomposed execution."
+        )
+
+    if targets is not None and pad_width == 0:
+        messages.append(
+            "pad_width=0 disables source overlap padding and may increase "
+            "boundary-related divergence for binary operations."
+        )
+
+    return messages
+
+
 def decompose(operation, sources, targets=None):
     """
     Decompose source(s) [and optional targets] and apply operation on each segment.
@@ -294,26 +356,14 @@ def decompose(operation, sources, targets=None):
     if targets:
         ants.utils.cube.guess_horizontal_bounds(targets)
 
-    x_split = CONFIG["ants_decomposition"]["x_split"]
-    y_split = CONFIG["ants_decomposition"]["y_split"]
+    split = _resolve_split_settings(
+        sources,
+        targets,
+        CONFIG["ants_decomposition"]["x_split"],
+        CONFIG["ants_decomposition"]["y_split"],
+    )
 
-    # x_split and y_split are None by default (set in config.py). If a user
-    # wanted the splits guessed, both splits must be set to 'automatic'. The
-    # same is true for 0, which is used if the user wants to disable the
-    # decomposition framework. If both splits are > 0, the decomposition
-    # framework will be used.
-
-    if (x_split is None) ^ (y_split is None):
-        msg = "If either x_split or y_split is set, both must be."
-        raise RuntimeError(msg)
-
-    if (x_split == "automatic") ^ (y_split == "automatic"):
-        msg = "If either x_split or y_split is set to automatic, both must be."
-        raise RuntimeError(msg)
-    elif (x_split == 0) ^ (y_split == 0):
-        msg = "If either x_split or y_split is set to 0, both must be."
-        raise RuntimeError(msg)
-    elif x_split == y_split == 0 or x_split is y_split is None:
+    if split is None:
         # No decomposition if both splits are set to 0 or if both splits are not
         # specified.
         if targets:
@@ -325,14 +375,11 @@ def decompose(operation, sources, targets=None):
         # is called.
         result = ants.utils.cube.defer_cube(result)
     else:
-        # Use decomposition
-        # Use splits from configuration.
-        split = {"split_x": x_split, "split_y": y_split}
-
-        if x_split == y_split == "automatic":
-            # Setting both splits to automatic means that the splits are guessed.
-            # Otherwise, the specified splits will be used.
-            split = _guess_split(sources, targets)
+        # Use decomposition.
+        for message in _assess_decomposition_preconditions(
+            operation, targets, pad_width
+        ):
+            _LOGGER.warning(message)
 
         if targets:
             mosaics = gen_mosaics(targets, split)
@@ -419,15 +466,7 @@ class _FileCleanup(object):
 def _operation_wrap(operation):
     # This function allows us to wrap user operations, providing deferred
     # return etc.
-    if hasattr(operation, "func"):
-        # Support for functools.partial
-        operation_name = operation.func.__name__
-    elif hasattr(operation, "__class__"):
-        # Support for callable classes
-        operation_name = operation.__class__.__name__
-    else:
-        # Support for functions
-        operation_name = operation.__name__
+    operation_name = _operation_name(operation)
 
     def wrapped_operation(*args, **kwargs):
         # source-target cube shapes
@@ -535,11 +574,8 @@ class DomainDecompose(object):
         else:
             return nlist
 
-    def _gather(self, results):
-        results = self._flatten(results)
-        cubes = iris.cube.CubeList(results)
-
-        # Associate our file cleanup objects
+    def _register_file_cleanup(self, cubes):
+        """Retain deferred file handles for cleanup after result lifetime."""
         for cube in cubes:
             # Global and local storage of filecleanup is necessary when
             # supporting both serial and multi-process running.
@@ -553,6 +589,7 @@ class DomainDecompose(object):
             # persist as long as that specific cube instance.
             # cube.lazy_data()._fh = _FileCleanup(cube._fh)
 
+    def _concatenate_cubes(self, cubes):
         cubes = cubes.concatenate()
         # After concatenation, ensure that we retain the circular attribute if
         # appropriate.
@@ -561,6 +598,12 @@ class DomainDecompose(object):
         if len(cubes) == 1:
             cubes = cubes[0]
         return cubes
+
+    def _gather(self, results):
+        results = self._flatten(results)
+        cubes = iris.cube.CubeList(results)
+        self._register_file_cleanup(cubes)
+        return self._concatenate_cubes(cubes)
 
     def _run(self, operation, args):
         _LOGGER.info(stats.sys_stat())
@@ -608,36 +651,14 @@ class DomainDecompose(object):
 
         source_generator = None
         if self._sources is not None:
-            if len(self._mosaics) == 1:
+            self._validate_source_mosaic_relationship()
+            if len(self._mosaics) == 1 or len(self._sources) == 1:
                 source_generator = zip(
                     *[
                         self.source_piece_generator(src, self._mosaics[0]())
                         for src in self._sources
                     ]
                 )
-            elif len(self._sources) == 1 and len(self._mosaics) > 1:
-                cubes = [mosaic.sliceable for mosaic in self._mosaics]
-                same_grid = ants.utils.cube.is_equal_hgrid(cubes)
-                if not same_grid:
-                    msg = (
-                        "Ill-defined relationship between 1 source and "
-                        "multiple targets, where those targets aren't"
-                        "defined on the same grid.  See the user guide "
-                        "for advanced usage."
-                    )
-                    raise RuntimeError(msg)
-                source_generator = zip(
-                    *[
-                        self.source_piece_generator(src, self._mosaics[0]())
-                        for src in self._sources
-                    ]
-                )
-            elif len(self._sources) != len(self._mosaics):
-                msg = (
-                    "Ill-defined relationship between number of sources "
-                    "and targets.  See the user guide for advanced usage."
-                )
-                raise RuntimeError(msg)
             else:
                 source_generator = zip(
                     *[
@@ -646,6 +667,29 @@ class DomainDecompose(object):
                     ]
                 )
         return source_generator
+
+    def _validate_source_mosaic_relationship(self):
+        """Validate supported cardinality relationship for sources and mosaics."""
+        if len(self._mosaics) == 1:
+            return
+        if len(self._sources) == 1 and len(self._mosaics) > 1:
+            cubes = [mosaic.sliceable for mosaic in self._mosaics]
+            same_grid = ants.utils.cube.is_equal_hgrid(cubes)
+            if not same_grid:
+                msg = (
+                    "Ill-defined relationship between 1 source and "
+                    "multiple targets, where those targets aren't"
+                    "defined on the same grid.  See the user guide "
+                    "for advanced usage."
+                )
+                raise RuntimeError(msg)
+            return
+        if len(self._sources) != len(self._mosaics):
+            msg = (
+                "Ill-defined relationship between number of sources "
+                "and targets.  See the user guide for advanced usage."
+            )
+            raise RuntimeError(msg)
 
     def _cleanup(self):
         """

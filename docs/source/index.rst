@@ -52,6 +52,7 @@ Contents:
    tutorials.rst
    core_capabilities.rst
    decomposition.rst
+   decomposition_analysis.rst
    release_notes/index.rst
 
 .. toctree::
