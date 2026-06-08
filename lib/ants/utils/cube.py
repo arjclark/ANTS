@@ -1085,13 +1085,14 @@ def defer_cube(cube):
     # themselves.  This has an undesirable effect of calling the object
     # tidy-up (thus deleting the files early).
     cubes = as_cubelist(cube)
-    #res = iris.cube.CubeList()
+    res = iris.cube.CubeList()
     for cc in cubes:
-        fh = tempfile.NamedTemporaryFile(suffix=".nc.npz")
+        fh = tempfile.NamedTemporaryFile(suffix=".npz")
         _LOGGER.info("Deferring data to {}".format(fh.name))
         # Close the created filehandle as we cannot share it between processes
         # if we could then it would clear up the file on garbage collection.
         fh.close()
+        cc._fh = fh.name
         #save.netcdf(cc, fh.name, update_history=False)
         #cc = ants.io.load.load_cube(fh.name)
         #cc._fh = fh.name
@@ -1103,19 +1104,27 @@ def defer_cube(cube):
         #np.save(fh.name, cc.data)
 
         #force realising the data for now...
-        cc.data
-        if isinstance(cc.core_data(), np.ma.MaskedArray):
-            np.savez_compressed(fh.name, data=cc.data.data, mask=cc.data.mask)
-            with np.load(fh.name) as payload:
-                cc.data = np.ma.MaskedArray(data = payload['data'], mask = payload['mask'])
-        else:
-            np.savez_compressed(fh.name, data=cc.data)
-            with np.load(fh.name) as payload:
-                cc.data = payload['data']
+#        ants.utils.cube.fix_mask(cc)
+#        cc.data
+#        print("cc object type is {}".format(type(cc)))
+#        acube = cc.copy()
+#        print("cc data type {}".format(type(cc.data)))
+#        print(cc)
+#        print(acube)
+#        if isinstance(cc.data, np.ma.MaskedArray):
+#            np.savez_compressed(fh.name, data=cc.data.data, mask=cc.data.mask)
+#            payload = np.load(fh.name)
+#            cc.copy(data=np.ma.MaskedArray(data = payload['data'], mask = payload['mask']))
+#        else:
+#            np.savez_compressed(fh.name, data=cc.data)
+#            payload = np.load(fh.name)
+#            cc.copy(data=payload['data'])
 
-        cc._fh = fh.name
+#        acube._fh = fh.name
+#        res.append(acube)
         atexit.register(_delete_temporary_file, fh.name)
-    #cubes = res
+
+#    cubes = res
     if isinstance(cube, iris.cube.Cube):
         cubes = cubes[0]
     return cubes

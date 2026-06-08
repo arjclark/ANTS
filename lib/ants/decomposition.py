@@ -323,7 +323,7 @@ def decompose(operation, sources, targets=None):
         # The result is deferred even though decomposition is not used,
         # in order to keep as much processing identical as possible when decompose
         # is called.
-        result = ants.utils.cube.defer_cube(result)
+        #result = ants.utils.cube.defer_cube(result)
     else:
         # Use decomposition
         # Use splits from configuration.
@@ -454,7 +454,7 @@ def _operation_wrap(operation):
             res = operation(*args, **kwargs)
         _LOGGER.info('operation: "{}" took {}'.format(operation_name, timer.time_taken))
 
-        res = ants.utils.cube.defer_cube(res)
+        #res = ants.utils.cube.defer_cube(res)
         return res
 
     return wrapped_operation
@@ -545,10 +545,11 @@ class DomainDecompose(object):
             # supporting both serial and multi-process running.
             # This must be performed here in the controlling process so that
             # temporary data persists until the end of the session.
-            if id(self) in _TMP_FILES:
-                _TMP_FILES[id(self)].append(_FileCleanup(cube._fh))
-            else:
-                _TMP_FILES[id(self)] = [_FileCleanup(cube._fh)]
+            if hasattr(cube, "_fh"):
+                if id(self) in _TMP_FILES:
+                    _TMP_FILES[id(self)].append(_FileCleanup(cube._fh))
+                else:
+                    _TMP_FILES[id(self)] = [_FileCleanup(cube._fh)]
             # Alternative approach is to allow the cleanup object only to
             # persist as long as that specific cube instance.
             # cube.lazy_data()._fh = _FileCleanup(cube._fh)
